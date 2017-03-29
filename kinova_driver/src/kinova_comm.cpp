@@ -61,9 +61,11 @@ KinovaComm::KinovaComm(const ros::NodeHandle& node_handle,
 
     int result = NO_ERROR_KINOVA;
 
-    // Get the serial number parameter for the arm we wish to connec to
+    // Get the serial number parameter for the arm we wish to connect to
     std::string serial_number = "";
     node_handle.getParam("serial_number", serial_number);
+		// Remove non alphanumerical characters
+		serial_number.erase(remove_if(serial_number.begin(), serial_number.end(), [](char c) { return !isalnum(c); } ), serial_number.end());
 
     int api_version[API_VERSION_COUNT];
     result = kinova_api_.getAPIVersion(api_version);
@@ -95,12 +97,16 @@ KinovaComm::KinovaComm(const ros::NodeHandle& node_handle,
         throw KinovaCommException("Could not get devices list count.", result);
     }
 
+
     bool found_arm = false;
     for (int device_i = 0; device_i < devices_count; device_i++)
     {
+				// Remove non alphanumerical characters in serial numbers
+				std::string s = devices_list[device_i].SerialNumber;
+				s.erase(remove_if(s.begin(), s.end(), [](char c) { return !isalnum(c); } ), s.end());
+
         // If no device is specified, just use the first available device
-        if ((serial_number == "")
-            || (std::strcmp(serial_number.c_str(), devices_list[device_i].SerialNumber) == 0))
+        if ((serial_number == "") || (serial_number == s))
         {
             result = kinova_api_.setActiveDevice(devices_list[device_i]);
             if (result != NO_ERROR_KINOVA)
@@ -154,8 +160,12 @@ KinovaComm::KinovaComm(const ros::NodeHandle& node_handle,
 
     if (!found_arm)
     {
-        ROS_ERROR("Could not find the specified arm (serial: %s) among the %d attached devices",
-                  serial_number.c_str(), devices_count);
+        ROS_ERROR_STREAM("Could not find the specified arm (serial: " << serial_number << ") among the " << devices_count << " attached devices");
+				ROS_ERROR("Possible device(s) are:");
+				for (int device_i = 0; device_i < devices_count; device_i++)
+				{
+					ROS_ERROR("\t%s", devices_list[device_i].SerialNumber);
+				}
         throw KinovaCommException("Could not find the specified arm", 0);
     }
 
@@ -863,15 +873,12 @@ void KinovaComm::setCartesianVelocities(const CartesianInfo &velocities)
     TrajectoryPoint kinova_velocity;
     kinova_velocity.InitStruct();
 
-    memset(&kinova_velocity, 0, sizeof(kinova_velocity));  // zero structure
-
-    //startAPI();
     kinova_velocity.Position.Type = CARTESIAN_VELOCITY;
 
     // confusingly, velocity is passed in the position struct
     kinova_velocity.Position.CartesianPosition = velocities;
 
-    int result = kinova_api_.sendAdvanceTrajectory(kinova_velocity);
+    int result = kinova_api_.sendBasicTrajectory(kinova_velocity);
     if (result != NO_ERROR_KINOVA)
     {
         throw KinovaCommException("Could not send advanced Cartesian velocity trajectory", result);
@@ -1098,6 +1105,85 @@ void KinovaComm::getFingerPositions(FingerAngles &fingers)
  */
 void KinovaComm::setFingerPositions(const FingerAngles &fingers, int timeout, bool push)
 {
+
+	boost::recursive_mutex::scoped_lock lock(api_mutex_);
+
+	if (isStopped())
+	{
+		ROS_INFO("The fingers could not be set because the arm is stopped");
+		return;
+	}
+
+	int result = NO_ERROR_KINOVA;
+	TrajectoryPoint kinova_angular;
+	kinova_angular.InitStruct();
+	//memset(&kinova_angular, 0, sizeof(kinova_angular));  // zero structure
+
+	if (push)
+	{
+		result = kinova_api_.eraseAllTrajectories();
+		if (result != NO_ERROR_KINOVA)
+		{
+			throw KinovaCommException("Could not erase trajectories", result);
+		}
+	}
+
+	//startAPI();
+
+	//result = kinova_api_.setAngularControl();
+	if (result != NO_ERROR_KINOVA)
+	{
+		throw KinovaCommException("Could not set Cartesian control", result);
+	}
+
+	// Initialize Cartesian control of the fingers
+	kinova_angular.Position.HandMode = POSITION_MODE;
+	//kinova_angular.Position.Type = ANGULAR_POSITION;
+	kinova_angular.Position.Type = CARTESIAN_POSITION;
+	kinova_angular.Position.Fingers = fingers;
+	kinova_angular.Position.Delay = 0.0;
+	kinova_angular.LimitationsActive = 0;
+
+	//AngularPosition joint_angles;
+	//memset(&joint_angles, 0, sizeof(joint_angles));  // zero structure
+
+	//// getAngularPosition will cause arm drop
+	//result = kinova_api_.getAngularCommand(joint_angles);
+
+	CartesianPosition joint_angles;
+	joint_angles.InitStruct();
+	//memset(&joint_angles, 0, sizeof(joint_angles));  // zero structure
+
+	// getAngularPosition will cause arm drop
+	result = kinova_api_.getCartesianCommand(joint_angles);
+
+	if (result != NO_ERROR_KINOVA)
+	{
+		throw KinovaCommException("Could not get the angular position", result);
+	}
+
+	//kinova_angular.Position.Actuators = joint_angles.Actuators;
+	kinova_angular.Position.CartesianPosition = joint_angles.Coordinates;
+
+	result = kinova_api_.sendAdvanceTrajectory(kinova_angular);
+	if (result != NO_ERROR_KINOVA)
+	{
+		throw KinovaCommException("Could not send advanced finger trajectory", result);
+	}
+
+}
+
+
+/**
+TODO: review
+ * @brief This function sets the finger velocity
+ * The new finger velocity, combined with current joint values are constructed as a trajectory point. sendAdvancedTrajectory() is called in api to complete the motion.
+ * @param fingers in deg/sec
+ * @param timeout timeout default 0.0, not used.
+ * @param push default true, errase all trajectory before request motion.
+ */
+void KinovaComm::setFingerVelocity(const FingerAngles &fingers, int timeout, bool push)
+{
     boost::recursive_mutex::scoped_lock lock(api_mutex_);
 
     if (isStopped())
@@ -1107,9 +1193,8 @@ void KinovaComm::setFingerPositions(const FingerAngles &fingers, int timeout, bo
     }
 
     int result = NO_ERROR_KINOVA;
-    TrajectoryPoint kinova_angular;
-    kinova_angular.InitStruct();
-    memset(&kinova_angular, 0, sizeof(kinova_angular));  // zero structure
+    TrajectoryPoint kinova_cart_vel;
+    kinova_cart_vel.InitStruct();
 
     if (push)
     {
@@ -1120,41 +1205,78 @@ void KinovaComm::setFingerPositions(const FingerAngles &fingers, int timeout, bo
         }
     }
 
-    //startAPI();
-
-    result = kinova_api_.setAngularControl();
     if (result != NO_ERROR_KINOVA)
     {
         throw KinovaCommException("Could not set Cartesian control", result);
     }
 
-    // Initialize Cartesian control of the fingers
-    kinova_angular.Position.HandMode = POSITION_MODE;
-    kinova_angular.Position.Type = ANGULAR_POSITION;
-    kinova_angular.Position.Fingers = fingers;
-    kinova_angular.Position.Delay = 0.0;
-    kinova_angular.LimitationsActive = 0;
-
-    AngularPosition joint_angles;
-    memset(&joint_angles, 0, sizeof(joint_angles));  // zero structure
-
-    // getAngularPosition will cause arm drop
-    // result = kinova_api_.getAngularPosition(joint_angles);
-    result = kinova_api_.getAngularCommand(joint_angles);
-    if (result != NO_ERROR_KINOVA)
-    {
-        throw KinovaCommException("Could not get the angular position", result);
-    }
-
-    kinova_angular.Position.Actuators = joint_angles.Actuators;
-
-    result = kinova_api_.sendAdvanceTrajectory(kinova_angular);
+    kinova_cart_vel.Position.Type = CARTESIAN_VELOCITY;
+    
+		kinova_cart_vel.Position.Fingers = fingers;
+		
+		result = kinova_api_.sendBasicTrajectory(kinova_cart_vel);
     if (result != NO_ERROR_KINOVA)
     {
         throw KinovaCommException("Could not send advanced finger trajectory", result);
     }
 }
 
+/**
+TODO: review
+ * @brief This function sets the finger and effector velocity
+ * The velocities must be sent at least at 100 Hz. Otherwise, the embeded control will 
+ * send zero velocity to the motor resulting in shaky commands. 
+ * sendBasicTrajectory() is called in api to complete the motion.
+ * @param fingers in deg/sec
+ * @param velocities in meters/sec and rad/sec
+ * @param timeout timeout default 0.0, not used.
+ * @param push default true, errase all trajectory before request motion.
+ */
+void KinovaComm::setFingerEffectorVelocity(const FingerAngles &fingers, const CartesianInfo &velocities, int timeout, bool push)
+{
+
+    boost::recursive_mutex::scoped_lock lock(api_mutex_);
+
+    if (isStopped())
+    {
+        ROS_INFO("The fingers could not be set because the arm is stopped");
+        return;
+    }
+
+    int result = NO_ERROR_KINOVA;
+    TrajectoryPoint kinova_vel;
+    kinova_vel.InitStruct();
+
+    if (push)
+    {
+        result = kinova_api_.eraseAllTrajectories();
+        if (result != NO_ERROR_KINOVA)
+        {
+            throw KinovaCommException("Could not erase trajectories", result);
+        }
+    }
+
+
+    if (result != NO_ERROR_KINOVA)
+    {
+        throw KinovaCommException("Could not set Cartesian control", result);
+    }
+
+    // Initialize Cartesian control of the fingers
+    kinova_vel.Position.Type = CARTESIAN_VELOCITY; 
+    
+		kinova_vel.Position.Fingers = fingers;
+    kinova_vel.Position.CartesianPosition = velocities;
+		
+    result = kinova_api_.sendBasicTrajectory(kinova_vel);
+		usleep(10000);	
+    result = kinova_api_.sendBasicTrajectory(kinova_vel);
+
+    if (result != NO_ERROR_KINOVA)
+    {
+        throw KinovaCommException("Could not send basic finger trajectory", result);
+    }
+}
 
 /**
  * @brief Dumps the current finger agnles onto the screen.

@@ -19,6 +19,7 @@ add_message_files(
   JointVelocity.msg
   KinovaPose.msg
   PoseVelocity.msg
+  PoseAndFingerVelocity.msg
 )
 
 add_service_files(

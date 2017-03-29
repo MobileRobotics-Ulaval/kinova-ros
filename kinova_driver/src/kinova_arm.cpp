@@ -141,9 +141,13 @@ KinovaArm::KinovaArm(KinovaComm &arm, const ros::NodeHandle &nodeHandle, const s
     /* Set up Subscribers*/
     joint_velocity_subscriber_ = node_handle_.subscribe("in/joint_velocity", 1,
                                                       &KinovaArm::jointVelocityCallback, this);
-    cartesian_velocity_subscriber_ = node_handle_.subscribe("in/cartesian_velocity", 1,
+    cartesian_velocity_subscriber_ = node_handle_.subscribe("in/cartesian_velocity", 10,
                                                           &KinovaArm::cartesianVelocityCallback, this);
 
+    fingers_velocity_subscriber_ = node_handle_.subscribe("in/finger_velocity", 10,
+                                                          &KinovaArm::fingersVelocityCallback, this);
+    fingers_effector_velocity_subscriber_ = node_handle_.subscribe("in/finger_effector_velocity", 10,
+                                                          &KinovaArm::fingersEffectorVelocityCallback, this);
     node_handle_.param<double>("status_interval_seconds", status_interval_seconds_, 0.1);
 
     // Depending on the API version, the arm might return velocities in the
@@ -291,6 +295,40 @@ void KinovaArm::cartesianVelocityCallback(const kinova_msgs::PoseVelocityConstPt
     }
 }
 
+void KinovaArm::fingersVelocityCallback(const kinova_msgs::FingerPositionConstPtr& fingersVelMsg)
+{
+    if (!kinova_comm_.isStopped())
+		{
+			FingerAngles finger_vel;
+			finger_vel.Finger1 = fingersVelMsg->finger1;
+			finger_vel.Finger2 = fingersVelMsg->finger2;
+			finger_vel.Finger3 = fingersVelMsg->finger3;
+
+			kinova_comm_.setFingerVelocity(finger_vel);
+		}
+}
+
+void KinovaArm::fingersEffectorVelocityCallback(const kinova_msgs::PoseAndFingerVelocityConstPtr& velMsg)
+{
+    if (!kinova_comm_.isStopped())
+		{
+			FingerAngles finger_vel;
+			finger_vel.Finger1 = velMsg->finger1;
+			finger_vel.Finger2 = velMsg->finger2;
+			finger_vel.Finger3 = velMsg->finger3;
+			
+			CartesianInfo velocities;
+			velocities.X = velMsg->twist_linear_x;
+			velocities.Y = velMsg->twist_linear_y;
+			velocities.Z = velMsg->twist_linear_z;
+			velocities.ThetaX = velMsg->twist_angular_x;
+			velocities.ThetaY = velMsg->twist_angular_y;
+			velocities.ThetaZ = velMsg->twist_angular_z;
+
+			kinova_comm_.setFingerEffectorVelocity(finger_vel, velocities);
+		}
+}
+
 /*!
  * \brief Publishes the current joint angles.
  *
@@ -338,17 +376,29 @@ void KinovaArm::publishJointAngles(void)
         joint_state.position[5] = kinova_angles.joint6 * M_PI/180;
     }
 
-    if(finger_number_==2)
-    {
-        joint_state.position[joint_total_number_-2] = 0;
-        joint_state.position[joint_total_number_-1] = 0;
-    }
-    else if(finger_number_==3)
-    {
-        joint_state.position[joint_total_number_-3] = 0;
-        joint_state.position[joint_total_number_-2] = 0;
-        joint_state.position[joint_total_number_-1] = 0;
-    }
+		if(finger_number_==2)
+		{
+			joint_state.position[joint_total_number_-2] = fingers.Finger1/6800*80*M_PI/180;
+			joint_state.position[joint_total_number_-1] = fingers.Finger2/6800*80*M_PI/180;
+		}
+		else if(finger_number_==3)
+		{
+			joint_state.position[joint_total_number_-3] = fingers.Finger1/6800*80*M_PI/180;
+			joint_state.position[joint_total_number_-2] = fingers.Finger2/6800*80*M_PI/180;
+			joint_state.position[joint_total_number_-1] = fingers.Finger3/6800*80*M_PI/180;
+		}
+
+    //if(finger_number_==2)
+    //{
+    //    joint_state.position[joint_total_number_-2] = 0;
+    //    joint_state.position[joint_total_number_-1] = 0;
+    //}
+    //else if(finger_number_==3)
+    //{
+    //    joint_state.position[joint_total_number_-3] = 0;
+    //    joint_state.position[joint_total_number_-2] = 0;
+    //    joint_state.position[joint_total_number_-1] = 0;
+    //}
 
 
     // Joint velocities
